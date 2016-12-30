@@ -11,18 +11,24 @@ from bson import json_util
 import os.path
 import json
 
-define("port", default=8080)
-define("ip", default="localhost")
-define("config_dir", default=os.path.dirname(__file__))
+from twitter import TwitterLogin
+
+
+_BASE_DIR = os.path.dirname(__file__)
+
+define("port", default=80)
+define("ip", default="0.0.0.0")
+define("config_dir", default=_BASE_DIR)
+define("debug", default=True)
 
 define("template_path", type=str,
-       default=os.path.join(os.path.dirname(__file__), "templates"))
+       default=os.path.join(_BASE_DIR, "templates"))
 define("static_path", type=str,
-       default=os.path.join(os.path.dirname(__file__), "static"))
-define("database_collection", type=str,
-       default="test")
+       default=os.path.join(_BASE_DIR, "static"))
+define("database_collection", type=str, default="friendfeed")
 define("twitter_consumer_key", type=str, group="twitter")
 define("twitter_consumer_secret", type=str, group="twitter")
+define("cookie_secret", type=str)
 
 
 class MainHandler(tornado.web.RequestHandler):
@@ -48,14 +54,22 @@ def main():
     settings = dict(
         template_path=options.template_path,
         static_path=options.static_path,
-        # db=motor.motor_tornado.MotorClient().test,  # test database
+        xsrf_cookies=True,
         db=getattr(motor.motor_tornado.MotorClient(),
                    options.database_collection),
+
+        # secret
+        cookie_secret=options.cookie_secret,
+
+        # twitter
+        twitter_consumer_key=options.twitter_consumer_key,
+        twitter_consumer_secret=options.twitter_consumer_secret,
     )
     # print(options.as_dict())
 
     app = tornado.web.Application([
         (r"/", MainHandler),
+        (r"/login/twitter", TwitterLogin),
     ], **settings)
     app.listen(options.port, options.ip)
 
