@@ -2,6 +2,7 @@
 import tornado.ioloop
 import tornado.gen
 import tornado.web
+from tornado.web import URLSpec as url
 import motor.motor_tornado
 
 from tornado.options import (define, options,
@@ -11,7 +12,8 @@ from bson import json_util
 import os.path
 import json
 
-from twitter import TwitterLogin
+import handlers
+import twitter
 
 
 _BASE_DIR = os.path.dirname(__file__)
@@ -31,7 +33,7 @@ define("twitter_consumer_secret", type=str, group="twitter")
 define("cookie_secret", type=str)
 
 
-class MainHandler(tornado.web.RequestHandler):
+class TestHandler(tornado.web.RequestHandler):
     @tornado.gen.coroutine
     def get(self):
         db = self.settings["db"]
@@ -64,12 +66,22 @@ def main():
         # twitter
         twitter_consumer_key=options.twitter_consumer_key,
         twitter_consumer_secret=options.twitter_consumer_secret,
+
+        # debug
+        debug=True,
+        autoreload=True,
     )
     # print(options.as_dict())
 
     app = tornado.web.Application([
-        (r"/", MainHandler),
-        (r"/login/twitter", TwitterLogin),
+        url(r"/", handlers.MainHandler),
+        url(r"/test", TestHandler),
+
+        # twitter
+        url(r"/login/twitter", twitter.TwitterLogin, name="twitter_login"),
+        url(r"/feed/twitter", twitter.TwitterHandler, name="twitter_feed"),
+        url(r"/ws/twitter", twitter.TwitterStreamHandler),
+        url(r"/logout/twitter", twitter.TwitterLogout, name="twitter_logout")
     ], **settings)
     app.listen(options.port, options.ip)
 
