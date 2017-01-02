@@ -1,7 +1,9 @@
 
+from __future__ import print_function
+
 from tornado.auth import TwitterMixin
 from tornado.escape import json_decode, json_encode
-from tornado.httpclient import HTTPRequest, AsyncHTTPClient
+from tornado.httpclient import AsyncHTTPClient
 import tornado.gen
 import tornado.web
 import tornado.websocket
@@ -49,9 +51,63 @@ class TwitterHandler(TwitterBaseHandler, TwitterMixin):
             access_token=self.current_user["access_token"]
         )
         # print(timeline)
-        self.render("twitter.html",
-                    timeline=timeline,
-                    tweet_ids=json_encode([t["id"] for t in timeline]))
+        self.render("twitter.html", timeline=timeline)
+
+
+class TwitterStreamTest(TwitterBaseHandler, tornado.auth.TwitterMixin):
+    http_client = None
+
+    @tornado.web.authenticated
+    @tornado.gen.coroutine
+    def get(self):
+        self.tweets_partial = b""       # each twitter json response
+        self.set_header("Content-Type", "text/plain")
+        self.stream_future = self.twitter_request(
+            "https://stream.twitter.com/1.1/statuses/filter.json",
+            post_args={"track": "sherlock"},  # due to its popularity
+            access_token=self.current_user["access_token"],
+        )
+        yield self.stream_future
+
+    def get_auth_http_client(self):
+        """override to use long lived http request (for twitter_request).
+        Ugly hack to make special HTTPRequest object
+        work with twitter_request.
+        self.http_client shared among all instances
+        """
+        if self.http_client is None:
+            # defaults passed onto HTTPRequest
+            self.http_client = AsyncHTTPClient(
+                defaults=dict(streaming_callback=self.on_chunk,
+                              force_instance=True,
+                              connect_timeout=600,  # 10mins
+                              request_timeout=600,)
+            )
+        return self.http_client
+
+    def on_chunk(self, chunk):
+        """flush tweet id to user"""
+        # chunk: byte string
+        self.tweets_partial += chunk
+        # print(chunk, end="\n\n")
+
+        idx_begin = 0
+        idx_end = self.tweets_partial.find(b"\r\n")
+        while idx_end != -1:
+            tweet_json = json_decode(self.tweets_partial[idx_begin:idx_end])
+            self.write(tweet_json["id_str"] + "\r\n")
+            print(tweet_json["id_str"])
+            self.flush()
+
+            idx_begin = idx_end + 2
+            idx_end = self.tweets_partial.find(b"\r\n", idx_begin)
+
+        self.tweets_partial = self.tweets_partial[idx_begin:]
+
+    def on_connection_close(self):
+        print("<client close connection>")
+        # bad news! tornado Future cannot be cancelled
+        self.stream_future.cancel()
 
 
 class TwitterStreamHandler(TwitterBaseHandler,
@@ -60,13 +116,10 @@ class TwitterStreamHandler(TwitterBaseHandler,
     @tornado.web.authenticated
     @tornado.gen.coroutine
     def open(self):
-        request = HTTPRequest(
+        yield self.twitter_request(
             "https://stream.twitter.com/1.1/statuses/sample.json",
-            method="GET",
-            auth_username="",
-            streaming_callback=None,
+            access_token=self.current_user["access_token"],
         )
-        self.fetch_future = AsyncHTTPClient(request).fetch()
 
     def on_message(self):
         pass

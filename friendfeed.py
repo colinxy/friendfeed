@@ -5,6 +5,7 @@ import tornado.web
 from tornado.web import URLSpec as url
 import motor.motor_tornado
 
+from tornado.log import enable_pretty_logging
 from tornado.options import (define, options,
                              parse_config_file, parse_command_line)
 
@@ -21,16 +22,18 @@ _BASE_DIR = os.path.dirname(__file__)
 define("port", default=80)
 define("ip", default="0.0.0.0")
 define("config_dir", default=_BASE_DIR)
-define("debug", default=True)
+define("debug", default=False)
 
 define("template_path", type=str,
        default=os.path.join(_BASE_DIR, "templates"))
 define("static_path", type=str,
        default=os.path.join(_BASE_DIR, "static"))
 define("database_collection", type=str, default="friendfeed")
+# cookie
+define("cookie_secret", type=str)
+# twitter
 define("twitter_consumer_key", type=str, group="twitter")
 define("twitter_consumer_secret", type=str, group="twitter")
-define("cookie_secret", type=str)
 
 
 class TestHandler(tornado.web.RequestHandler):
@@ -53,24 +56,12 @@ def main():
                       final=False)
     parse_config_file(os.path.join(options.config_dir, "secrets.cfg"),
                       final=False)
-    settings = dict(
-        template_path=options.template_path,
-        static_path=options.static_path,
-        xsrf_cookies=True,
-        db=getattr(motor.motor_tornado.MotorClient(),
-                   options.database_collection),
+    define("xsrf_cookies", default=True)
+    define("db", default=getattr(motor.motor_tornado.MotorClient(),
+                                 options.database_collection))
 
-        # secret
-        cookie_secret=options.cookie_secret,
-
-        # twitter
-        twitter_consumer_key=options.twitter_consumer_key,
-        twitter_consumer_secret=options.twitter_consumer_secret,
-
-        # debug
-        debug=True,
-        autoreload=True,
-    )
+    if options.debug:
+        enable_pretty_logging()
     # print(options.as_dict())
 
     app = tornado.web.Application([
@@ -81,8 +72,9 @@ def main():
         url(r"/login/twitter", twitter.TwitterLogin, name="twitter_login"),
         url(r"/feed/twitter", twitter.TwitterHandler, name="twitter_feed"),
         url(r"/ws/twitter", twitter.TwitterStreamHandler),
+        url(r"/test/twitter", twitter.TwitterStreamTest),
         url(r"/logout/twitter", twitter.TwitterLogout, name="twitter_logout")
-    ], **settings)
+    ], **options.as_dict())
     app.listen(options.port, options.ip)
 
 

@@ -11,9 +11,7 @@
 
       <div id="tweet-{{ tweet['id'] }}"></div>
       <script type="text/javascript">
-       twttr.ready(function() {
-         embedTweet("{{ tweet['id'] }}");
-       })
+       twttr.ready(function() { embedTweet("{{ tweet['id'] }}"); });
       </script>
       {% end %}
     </ul>
