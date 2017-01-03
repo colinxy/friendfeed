@@ -71,10 +71,6 @@ class TwitterHandler(TwitterBaseHandler, TwitterMixin):
 
 
 class TwitterStreamMixin(TwitterBaseHandler, TwitterMixin):
-    pass
-
-
-class TwitterStreamTest(TwitterBaseHandler, TwitterMixin):
     # refer to https://dev.twitter.com/streaming/overview/connecting
     # for more complete HTTP Error Codes description
     TWITTER_STREAMING_ERRORS = {
@@ -90,55 +86,36 @@ class TwitterStreamTest(TwitterBaseHandler, TwitterMixin):
 
     http_client = None
 
-    @tornado.web.authenticated
     @tornado.gen.coroutine
-    def get(self):
+    def stream(self, path, post_args=None):
         self.tweets_partial = b""       # each twitter json response
-        self.set_header("Content-Type", "text/plain")
-
         self.streaming = True   # False on_connection_close
+
         while self.streaming:
             self.stream_future = self.twitter_request(
-                "https://stream.twitter.com/1.1/statuses/filter.json",
-                post_args={"track": "sherlock"},  # due to its popularity
+                path,
+                post_args=post_args,
                 access_token=self.current_user["access_token"],
             )
             try:
                 yield self.stream_future
             except tornado.httpclient.HTTPError as err:
                 # only catch 599 timeout error
-                if err.code in self.TWITTER_STREAMING_ERRORS:
-                    tornado.log.app_log.error(
-                        "Twitter Streaming Error {} {}: {}"
-                        .format(err.code,
-                                self.TWITTER_STREAMING_ERRORS[err.code],
-                                err.message))
-                    raise err
-                elif err.code != 599:
-                    tornado.log.app_log.error("Twitter Streaming: " +
-                                              err.message)
-                    raise err
+                if err.code != 599:
+                    self.on_error(err)
                 # print("==> reconnectiong")
 
-    def get_auth_http_client(self):
-        """Override ``tornado.auth.OAuthMixin.get_auth_http_client``
-        to use long lived http request client.
-        Make special HTTPRequest object work with twitter_request
-        without interfering other HTTPRequest. Note self.http_client
-        is shared among all twitter streaming instances
+    def on_error(self, err):
+        """Called when twitter streaming error occurs.
         """
-        if self.http_client is None:
-            # defaults passed onto HTTPRequest
-            self.http_client = AsyncHTTPClient(
-                defaults=dict(streaming_callback=self.on_chunk,
-                              force_instance=True,
-                              connect_timeout=300,
-                              request_timeout=300,)
-            )
-        return self.http_client
+        raise NotImplementedError()
 
     def on_chunk(self, chunk):
-        """Handles when data arrives from stream"""
+        """Called when data arrives from stream.
+        Based on twitter streaming documentation
+        https://dev.twitter.com/streaming/overview/processing,
+        each valid json response is delimited by b"\r\n".
+        """
         # print(type(chunk))
         # chunk: byte string, each chunk might be incomplete json
         self.tweets_partial += chunk
@@ -154,16 +131,21 @@ class TwitterStreamTest(TwitterBaseHandler, TwitterMixin):
                 raise err
 
             # print(tweet_json["id_str"])
-            self.write(tweet_json["id_str"] + "\r\n")
-            self.flush()
+            self.on_json(tweet_json)
             i_beg = i_end + 2
             i_end = self.tweets_partial.find(b"\r\n", i_beg)
 
         self.tweets_partial = self.tweets_partial[i_beg:]
 
+    def on_json(self, chunk_json):
+        """Called when a valid json response arrives from stream.
+        Note it is overrider's responsibility to flush response.
+        """
+        raise NotImplementedError()
+
     def on_connection_close(self):
         """Override ``tornado.web.RequestHandler.on_connection_close``
-        to terminate twitter streaming.
+        to handle terminating twitter streaming.
         """
         # print("==> client close connection")
         # bad news! tornado Future cannot be cancelled
@@ -183,6 +165,54 @@ class TwitterStreamTest(TwitterBaseHandler, TwitterMixin):
             )
             return
         future.set_result(json_decode(response.body))
+
+    def get_auth_http_client(self):
+        """Override ``tornado.auth.OAuthMixin.get_auth_http_client``
+        to use long lived http request client.
+        Create a special HTTPRequest object to work with twitter_request
+        without interfering other HTTPRequest. Note self.http_client
+        is shared among all twitter streaming instances
+        """
+        if self.http_client is None:
+            # defaults passed onto HTTPRequest
+            self.http_client = AsyncHTTPClient(
+                defaults=dict(streaming_callback=self.on_chunk,
+                              force_instance=True,
+                              connect_timeout=300,
+                              request_timeout=300,)
+            )
+        return self.http_client
+
+
+class TwitterStreamTest(TwitterStreamMixin,
+                        TwitterBaseHandler,
+                        TwitterMixin):
+    @tornado.web.authenticated
+    @tornado.gen.coroutine
+    def get(self):
+        self.set_header("Content-Type", "text/plain")
+        yield self.stream(
+            "https://stream.twitter.com/1.1/statuses/filter.json",
+            post_args={"track": "sherlock"},  # due to its popularity
+        )
+
+    def on_json(self, tweet_json):
+        self.write(tweet_json["id_str"] + "\r\n")
+        self.flush()
+
+    def on_error(self, err):
+        if err.code in self.TWITTER_STREAMING_ERRORS:
+            tornado.log.app_log.error(
+                "Twitter Streaming Error {} {}: {}"
+                .format(err.code,
+                        self.TWITTER_STREAMING_ERRORS[err.code],
+                        err.message))
+        elif err.code != 599:
+            tornado.log.app_log.error(
+                "Twitter Streaming Error {}: {}"
+                .format(err.code,
+                        err.message))
+        raise err
 
 
 class TwitterStreamHandler(TwitterBaseHandler,
