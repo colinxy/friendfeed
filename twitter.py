@@ -3,20 +3,31 @@ from __future__ import print_function
 
 from tornado.auth import TwitterMixin
 from tornado.escape import json_decode, json_encode
-from tornado.httpclient import AsyncHTTPClient
+from tornado.httpclient import AsyncHTTPClient, HTTPError
 import tornado.gen
+import tornado.log
 import tornado.web
 import tornado.websocket
+
+import json
 
 
 class TwitterBaseHandler(tornado.web.RequestHandler):
     _TWITTER_COOKIE = "twitter_user"
 
     def get_current_user(self):
-        user_json = self.get_secure_cookie(self._TWITTER_COOKIE)
-        if not user_json:
+        user_json_bytes = self.get_secure_cookie(self._TWITTER_COOKIE)
+        # print(json.dumps(json_decode(user_json_bytes), indent=4))
+        if not user_json_bytes:
             return None
-        return json_decode(user_json)
+        user_json = json_decode(user_json_bytes)
+        return user_json        # self._filter_user_json(user_json)
+
+    def _filter_user_json(self, user_json):
+        return dict(username=user_json["username"],
+                    name=user_json["name"],
+                    id_str=user_json["id_str"],
+                    access_token=user_json["access_token"])
 
     def get_login_url(self):
         return self.reverse_url("twitter_login")
@@ -25,10 +36,15 @@ class TwitterBaseHandler(tornado.web.RequestHandler):
 class TwitterLogin(TwitterBaseHandler, TwitterMixin):
     @tornado.gen.coroutine
     def get(self):
+        if self.current_user:
+            self.redirect(self.reverse_url("twitter_feed"))
+
+        # 3 phase OAuth
         if self.get_argument("oauth_token", None):
             user = yield self.get_authenticated_user()
             # cookie: path='/'
-            self.set_secure_cookie(self._TWITTER_COOKIE, json_encode(user))
+            self.set_secure_cookie(self._TWITTER_COOKIE,
+                                   json_encode(self._filter_user_json(user)))
             # print(user)
             self.redirect(self.reverse_url("twitter_feed"))
         else:
@@ -54,7 +70,24 @@ class TwitterHandler(TwitterBaseHandler, TwitterMixin):
         self.render("twitter.html", timeline=timeline)
 
 
-class TwitterStreamTest(TwitterBaseHandler, tornado.auth.TwitterMixin):
+class TwitterStreamMixin(TwitterBaseHandler, TwitterMixin):
+    pass
+
+
+class TwitterStreamTest(TwitterBaseHandler, TwitterMixin):
+    # refer to https://dev.twitter.com/streaming/overview/connecting
+    # for more complete HTTP Error Codes description
+    TWITTER_STREAMING_ERRORS = {
+        401: "Unauthorized",
+        403: "Forbidden",
+        404: "Unknown",
+        406: "Not Acceptable",
+        413: "Too Long",
+        416: "Range Unacceptable",
+        420: "Rate Limited",
+        503: "Service Unavailable",
+    }
+
     http_client = None
 
     @tornado.web.authenticated
@@ -62,57 +95,99 @@ class TwitterStreamTest(TwitterBaseHandler, tornado.auth.TwitterMixin):
     def get(self):
         self.tweets_partial = b""       # each twitter json response
         self.set_header("Content-Type", "text/plain")
-        self.stream_future = self.twitter_request(
-            "https://stream.twitter.com/1.1/statuses/filter.json",
-            post_args={"track": "sherlock"},  # due to its popularity
-            access_token=self.current_user["access_token"],
-        )
-        yield self.stream_future
+
+        self.streaming = True   # False on_connection_close
+        while self.streaming:
+            self.stream_future = self.twitter_request(
+                "https://stream.twitter.com/1.1/statuses/filter.json",
+                post_args={"track": "sherlock"},  # due to its popularity
+                access_token=self.current_user["access_token"],
+            )
+            try:
+                yield self.stream_future
+            except tornado.httpclient.HTTPError as err:
+                # only catch 599 timeout error
+                if err.code in self.TWITTER_STREAMING_ERRORS:
+                    tornado.log.app_log.error(
+                        "Twitter Streaming Error {} {}: {}"
+                        .format(err.code,
+                                self.TWITTER_STREAMING_ERRORS[err.code],
+                                err.message))
+                    raise err
+                elif err.code != 599:
+                    tornado.log.app_log.error("Twitter Streaming: " +
+                                              err.message)
+                    raise err
+                # print("==> reconnectiong")
 
     def get_auth_http_client(self):
-        """override to use long lived http request (for twitter_request).
-        Ugly hack to make special HTTPRequest object
-        work with twitter_request.
-        self.http_client shared among all instances
+        """Override ``tornado.auth.OAuthMixin.get_auth_http_client``
+        to use long lived http request client.
+        Make special HTTPRequest object work with twitter_request
+        without interfering other HTTPRequest. Note self.http_client
+        is shared among all twitter streaming instances
         """
         if self.http_client is None:
             # defaults passed onto HTTPRequest
             self.http_client = AsyncHTTPClient(
                 defaults=dict(streaming_callback=self.on_chunk,
                               force_instance=True,
-                              connect_timeout=600,  # 10mins
-                              request_timeout=600,)
+                              connect_timeout=300,
+                              request_timeout=300,)
             )
         return self.http_client
 
     def on_chunk(self, chunk):
-        """flush tweet id to user"""
-        # chunk: byte string
+        """Handles when data arrives from stream"""
+        # print(type(chunk))
+        # chunk: byte string, each chunk might be incomplete json
         self.tweets_partial += chunk
         # print(chunk, end="\n\n")
 
-        idx_begin = 0
-        idx_end = self.tweets_partial.find(b"\r\n")
-        while idx_end != -1:
-            tweet_json = json_decode(self.tweets_partial[idx_begin:idx_end])
+        i_beg = 0
+        i_end = self.tweets_partial.find(b"\r\n")
+        while i_end != -1:
+            try:
+                tweet_json = json_decode(self.tweets_partial[i_beg:i_end])
+            except json.decoder.JSONDecodeError as err:
+                print(self.tweets_partial[i_beg:i_end])
+                raise err
+
+            # print(tweet_json["id_str"])
             self.write(tweet_json["id_str"] + "\r\n")
-            print(tweet_json["id_str"])
             self.flush()
+            i_beg = i_end + 2
+            i_end = self.tweets_partial.find(b"\r\n", i_beg)
 
-            idx_begin = idx_end + 2
-            idx_end = self.tweets_partial.find(b"\r\n", idx_begin)
-
-        self.tweets_partial = self.tweets_partial[idx_begin:]
+        self.tweets_partial = self.tweets_partial[i_beg:]
 
     def on_connection_close(self):
-        print("<client close connection>")
+        """Override ``tornado.web.RequestHandler.on_connection_close``
+        to terminate twitter streaming.
+        """
+        # print("==> client close connection")
         # bad news! tornado Future cannot be cancelled
-        self.stream_future.cancel()
+        # self.stream_future.cancel()
+        # use short connection timeout and reconnect
+        self.streaming = False
+
+    def _on_twitter_request(self, future, response):
+        """Override ``tornado.auth.TwitterMixin._on_twitter_request``
+        to throw httpclient.HTTPError instead of auth.AuthError.
+        """
+        if response.error:
+            future.set_exception(
+                HTTPError(response.code,
+                          "Error response {} fetching {}"
+                          .format(response.error, response.request.url))
+            )
+            return
+        future.set_result(json_decode(response.body))
 
 
 class TwitterStreamHandler(TwitterBaseHandler,
                            tornado.websocket.WebSocketHandler,
-                           tornado.auth.TwitterMixin):
+                           TwitterMixin):
     @tornado.web.authenticated
     @tornado.gen.coroutine
     def open(self):
