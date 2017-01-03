@@ -39,7 +39,7 @@ class TwitterLogin(TwitterBaseHandler, TwitterMixin):
         if self.current_user:
             self.redirect(self.reverse_url("twitter_feed"))
 
-        # 3 phase OAuth
+        # 3-phase OAuth
         if self.get_argument("oauth_token", None):
             user = yield self.get_authenticated_user()
             # cookie: path='/'
@@ -57,7 +57,7 @@ class TwitterLogout(TwitterBaseHandler):
         self.redirect("/")
 
 
-class TwitterHandler(TwitterBaseHandler, TwitterMixin):
+class TwitterFeedHandler(TwitterBaseHandler, TwitterMixin):
     @tornado.web.authenticated
     @tornado.gen.coroutine
     def get(self):
@@ -88,8 +88,8 @@ class TwitterStreamMixin(TwitterBaseHandler, TwitterMixin):
 
     @tornado.gen.coroutine
     def stream(self, path, post_args=None):
-        self.tweets_partial = b""       # each twitter json response
-        self.streaming = True   # False on_connection_close
+        self.tweets_partial = b""  # each twitter json response
+        self.streaming = True      # False on_connection_close
 
         while self.streaming:
             self.stream_future = self.twitter_request(
@@ -127,10 +127,12 @@ class TwitterStreamMixin(TwitterBaseHandler, TwitterMixin):
             try:
                 tweet_json = json_decode(self.tweets_partial[i_beg:i_end])
             except json.decoder.JSONDecodeError as err:
-                print(self.tweets_partial[i_beg:i_end])
-                raise err
+                # print(self.tweets_partial[i_beg:i_end])
+                tornado.log.app_log.exception(err)
+                self.streaming = False
+                break
 
-            # print(tweet_json["id_str"])
+            # print(tweet_json)
             self.on_json(tweet_json)
             i_beg = i_end + 2
             i_end = self.tweets_partial.find(b"\r\n", i_beg)
@@ -215,19 +217,27 @@ class TwitterStreamTest(TwitterStreamMixin,
         raise err
 
 
-class TwitterStreamHandler(TwitterBaseHandler,
-                           tornado.websocket.WebSocketHandler,
+class TwitterStreamHandler(tornado.websocket.WebSocketHandler,
+                           TwitterStreamMixin,
+                           TwitterBaseHandler,
                            TwitterMixin):
     @tornado.web.authenticated
     @tornado.gen.coroutine
     def open(self):
-        yield self.twitter_request(
-            "https://stream.twitter.com/1.1/statuses/sample.json",
-            access_token=self.current_user["access_token"],
+        yield self.stream(
+            "https://stream.twitter.com/1.1/statuses/filter.json",
+            post_args={"track": "sherlock"},  # due to its popularity
         )
+
+    def on_json(self, tweet_json):
+        self.write_message(dict(
+            id_str=tweet_json["id_str"],
+            user_screen_name=tweet_json["user"]["screen_name"],
+            text=tweet_json["text"],
+        ))
 
     def on_message(self):
         pass
 
     def on_close(self):
-        pass
+        self.streaming = False

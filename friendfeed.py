@@ -70,10 +70,14 @@ def main():
 
         # twitter
         url(r"/login/twitter", twitter.TwitterLogin, name="twitter_login"),
-        url(r"/feed/twitter", twitter.TwitterHandler, name="twitter_feed"),
-        url(r"/ws/twitter", twitter.TwitterStreamHandler),
+        url(r"/logout/twitter", twitter.TwitterLogout, name="twitter_logout"),
+        url(r"/feed/twitter", twitter.TwitterFeedHandler,
+            name="twitter_feed"),
+        url(r"/stream/twitter", twitter.TwitterStreamHandler,
+            name="twitter_stream"),
         url(r"/test/twitter", twitter.TwitterStreamTest),
-        url(r"/logout/twitter", twitter.TwitterLogout, name="twitter_logout")
+
+        # facebook
     ], **options.as_dict())
     app.listen(options.port, options.ip)
 
