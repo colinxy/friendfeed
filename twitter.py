@@ -126,16 +126,18 @@ class TwitterStreamMixin(TwitterBaseHandler, TwitterMixin):
         while i_end != -1:
             try:
                 tweet_json = json_decode(self.tweets_partial[i_beg:i_end])
+                # print(tweet_json)
+                self.on_json(tweet_json)
             except json.decoder.JSONDecodeError as err:
-                # print(self.tweets_partial[i_beg:i_end])
-                tornado.log.app_log.exception(err)
-                self.streaming = False
-                break
-
-            # print(tweet_json)
-            self.on_json(tweet_json)
-            i_beg = i_end + 2
-            i_end = self.tweets_partial.find(b"\r\n", i_beg)
+                # sometime only empty response is sent (not valid json)
+                tornado.log.app_log.warn(err, exc_info=1)
+                # tornado.log.app_log.error(self.tweets_partial)
+                tornado.log.app_log.warn(self.tweets_partial[i_beg:i_end])
+                # self.streaming = False
+                # break
+            finally:
+                i_beg = i_end + 2
+                i_end = self.tweets_partial.find(b"\r\n", i_beg)
 
         self.tweets_partial = self.tweets_partial[i_beg:]
 
@@ -149,6 +151,7 @@ class TwitterStreamMixin(TwitterBaseHandler, TwitterMixin):
         """Override ``tornado.web.RequestHandler.on_connection_close``
         to handle terminating twitter streaming.
         """
+        super(TwitterStreamMixin, self).on_connection_close()
         # print("==> client close connection")
         # bad news! tornado Future cannot be cancelled
         # self.stream_future.cancel()
@@ -192,7 +195,8 @@ class TwitterStreamTest(TwitterStreamMixin,
     @tornado.web.authenticated
     @tornado.gen.coroutine
     def get(self):
-        self.set_header("Content-Type", "text/plain")
+        tornado.log.app_log.info("test endpoint hit")
+        self.set_header("Content-Type", "text/plain; charset=utf-8")
         yield self.stream(
             "https://stream.twitter.com/1.1/statuses/filter.json",
             post_args={"track": "sherlock"},  # due to its popularity
@@ -218,13 +222,12 @@ class TwitterStreamTest(TwitterStreamMixin,
 
 
 class TwitterStreamHandler(tornado.websocket.WebSocketHandler,
-                           TwitterStreamMixin,
+                           # TwitterStreamMixin,
                            TwitterBaseHandler,
                            TwitterMixin):
     @tornado.web.authenticated
-    @tornado.gen.coroutine
     def open(self):
-        yield self.stream(
+        self.stream_future = self.twitter_request(
             "https://stream.twitter.com/1.1/statuses/filter.json",
             post_args={"track": "sherlock"},  # due to its popularity
         )
@@ -236,7 +239,7 @@ class TwitterStreamHandler(tornado.websocket.WebSocketHandler,
             text=tweet_json["text"],
         ))
 
-    def on_message(self):
+    def on_message(self, msg):
         pass
 
     def on_close(self):
